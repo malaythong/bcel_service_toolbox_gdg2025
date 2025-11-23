@@ -1,18 +1,18 @@
 sources:
   my-pg-instance:
     kind: alloydb-postgres
-    project: retrieval-app-testing  # <-- เช็คว่าชื่อ Project ตรงกับของคุณไหม
+    project: flowing-athlete-478809-b3  # <-- เช็คว่าชื่อ Project ตรงกับของคุณไหม
     region: us-central1             # <-- เช็ค Region ด้วย
-    cluster: my-alloydb-cluster     # <-- ชื่อ Cluster
-    instance: my-alloydb-instance   # <-- ชื่อ Instance
-    database: assistantdemo         # <-- ชื่อ Database
+    cluster: alloydb-aip-01    # <-- ชื่อ Cluster
+    instance: alloydb-aip-01-pr # <-- ชื่อ Instance
+    database: quickstart_db         # <-- ชื่อ Database
     user: postgres
     password: postgres
 
 authServices:
   my_google_service:
     kind: google
-    clientId: 706535509072-qa5v22ur8ik8o513b0538ufo0ne9jfn5.apps.googleusercontent.com
+    clientId: 832318479212-t74dknde3sbqmfd76bau2cam1de1543r.apps.googleusercontent.com
 
 tools:
   # --- New Tool for BCEL Products ---
