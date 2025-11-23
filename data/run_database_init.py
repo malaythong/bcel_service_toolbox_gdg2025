@@ -14,259 +14,140 @@
 
 import asyncio
 import csv
+import vertexai
 from datetime import datetime, time
+from vertexai.language_models import TextEmbeddingModel
 
+# ตรวจสอบ import นี้ให้ถูกต้องตามโปรเจกต์เดิม
 from toolbox_core import ToolboxClient
-
 from agent.tools import TOOLBOX_URL
-from models import Airport, Amenity, Flight, Policy
 
+# Import Model Product ที่เราสร้างกันในขั้นตอนก่อนหน้า
+from models import Product
 
-async def load_dataset(
-    airports_ds_path: str,
-    amenities_ds_path: str,
-    flights_ds_path: str,
-    policies_ds_path: str,
-) -> tuple[
-    list[Airport],
-    list[Amenity],
-    list[Flight],
-    list[Policy],
-]:
-    airports: list[Airport] = []
-    with open(airports_ds_path, "r") as f:
+# ฟังก์ชันช่วยสร้าง Embedding (แปลงข้อความ -> ตัวเลข)
+def get_embeddings(texts: list[str]) -> list[list[float]]:
+    # ใช้ Model text-embedding-004 (รุ่นใหม่ รองรับหลายภาษา)
+    model = TextEmbeddingModel.from_pretrained("text-embedding-004")
+    # Vertex AI รับ input ได้เป็น batch (แนะนำทีละไม่เกิน 5-10 ถ้าข้อมูลเยอะ)
+    embeddings = model.get_embeddings(texts)
+    return [e.values for e in embeddings]
+
+async def load_dataset(products_ds_path: str) -> list[Product]:
+    products: list[Product] = []
+    
+    # อ่านไฟล์ CSV (ระบุ encoding='utf-8-sig' เพื่อรองรับภาษาลาว)
+    with open(products_ds_path, "r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f, delimiter=",")
-        airports = [Airport.model_validate(line) for line in reader]
+        rows = list(reader)  # อ่านทั้งหมดมาเก็บใน list ก่อน
 
-    amenities: list[Amenity] = []
-    with open(amenities_ds_path, "r") as f:
-        reader = csv.DictReader(f, delimiter=",")
-        amenities = [Amenity.model_validate(line) for line in reader]
+        # เตรียมข้อความสำหรับทำ Embedding
+        # เราจะเอา "ชื่อสินค้า + รายละเอียด + กลุ่มลูกค้า" มารวมกันเพื่อให้ AI เข้าใจบริบทครบถ้วน
+        texts_to_embed = [
+            f"{row['product_name']} {row['description']} ({row['audience']})" 
+            for row in rows
+        ]
 
-    flights: list[Flight] = []
-    with open(flights_ds_path, "r") as f:
-        reader = csv.DictReader(f, delimiter=",")
-        flights = [Flight.model_validate(line) for line in reader]
+        # สร้าง Embeddings (ถ้าข้อมูลเยอะ ควรแบ่งทำทีละ batch)
+        print(f"Generating embeddings for {len(rows)} products...")
+        vectors = get_embeddings(texts_to_embed)
 
-    policies: list[Policy] = []
-    with open(policies_ds_path, "r") as f:
-        reader = csv.DictReader(f, delimiter=",")
-        policies = [Policy.model_validate(line) for line in reader]
+        for i, row in enumerate(rows):
+            # แก้ไขชื่อ Key ให้ตรงกับใน models.py (CSV เป็น P ตัวใหญ่)
+            # ถ้า models.py คุณใช้ 'products_types' แต่ CSV เป็น 'Products_types'
+            row['products_types'] = row.pop('Products_types', '')
 
-    return airports, amenities, flights, policies
+            # ใส่ค่า Embedding ที่สร้างเสร็จแล้วกลับเข้าไป
+            row['embedding'] = vectors[i]
+            
+            # แปลงเป็น Object Product
+            products.append(Product.model_validate(row))
 
+    return products
 
 def __escape_sql(value):
     if value is None:
         return "NULL"
     if isinstance(value, str):
         return f"""'{value.replace("'", "''")}'"""
+    # List (Vector) จะถูกแปลงเป็น string เช่น '[0.1, 0.2, ...]' ซึ่ง SQL รับได้
     if isinstance(value, list):
-        return f"""'{value}'"""
-    if isinstance(value, time) or isinstance(value, datetime):
         return f"""'{value}'"""
     return value
 
-
-async def initialize_data(
-    airports: list[Airport],
-    amenities: list[Amenity],
-    flights: list[Flight],
-    policies: list[Policy],
-) -> None:
+async def initialize_data(products: list[Product]) -> None:
     async with ToolboxClient(TOOLBOX_URL) as toolbox:
         execute_sql = await toolbox.load_tool("execute_sql")
 
-        # If the table already exists, drop it to avoid conflicts
-        await execute_sql("DROP TABLE IF EXISTS airports CASCADE")
-        # Create a new table
-        await execute_sql(
-            """
-            CREATE TABLE airports(
-                id INT PRIMARY KEY,
-                iata TEXT,
-                name TEXT,
-                city TEXT,
-                country TEXT
-            )
-        """
-        )
-        # Insert all the data
-        values = [
-            f"""(
-            {__escape_sql(a.id)},
-            {__escape_sql(a.iata)},
-            {__escape_sql(a.name)},
-            {__escape_sql(a.city)},
-            {__escape_sql(a.country)}
-        )"""
-            for a in airports
-        ]
-        await execute_sql(f"""INSERT INTO airports VALUES {", ".join(values)}""")
-        print("Airports table initialized")
+        print("Initializing database...")
 
-        await execute_sql(
-            "CREATE EXTENSION IF NOT EXISTS google_ml_integration CASCADE"
-        )
+        # 1. เปิดใช้งาน Vector Extension
         await execute_sql("CREATE EXTENSION IF NOT EXISTS vector")
-        # If the table already exists, drop it to avoid conflicts
+
+        # 2. ลบตารางเก่าทิ้ง (Clean up)
+        await execute_sql("DROP TABLE IF EXISTS airports CASCADE")
         await execute_sql("DROP TABLE IF EXISTS amenities CASCADE")
-        # Create a new table
-        await execute_sql(
-            """
-            CREATE TABLE amenities(
-                id INT PRIMARY KEY,
-                name TEXT,
-                description TEXT,
-                location TEXT,
-                terminal TEXT,
-                category TEXT,
-                hour TEXT,
-                sunday_start_hour TIME,
-                sunday_end_hour TIME,
-                monday_start_hour TIME,
-                monday_end_hour TIME,
-                tuesday_start_hour TIME,
-                tuesday_end_hour TIME,
-                wednesday_start_hour TIME,
-                wednesday_end_hour TIME,
-                thursday_start_hour TIME,
-                thursday_end_hour TIME,
-                friday_start_hour TIME,
-                friday_end_hour TIME,
-                saturday_start_hour TIME,
-                saturday_end_hour TIME,
-                content TEXT NOT NULL,
-                embedding vector(3072) NOT NULL
-            )
-        """
-        )
-        # Insert all the data
-        values = [
-            f"""(
-            {__escape_sql(a.id)},
-            {__escape_sql(a.name)},
-            {__escape_sql(a.description)},
-            {__escape_sql(a.location)},
-            {__escape_sql(a.terminal)},
-            {__escape_sql(a.category)},
-            {__escape_sql(a.hour)},
-            {__escape_sql(a.sunday_start_hour)},
-            {__escape_sql(a.sunday_end_hour)},
-            {__escape_sql(a.monday_start_hour)},
-            {__escape_sql(a.monday_end_hour)},
-            {__escape_sql(a.tuesday_start_hour)},
-            {__escape_sql(a.tuesday_end_hour)},
-            {__escape_sql(a.wednesday_start_hour)},
-            {__escape_sql(a.wednesday_end_hour)},
-            {__escape_sql(a.thursday_start_hour)},
-            {__escape_sql(a.thursday_end_hour)},
-            {__escape_sql(a.friday_start_hour)},
-            {__escape_sql(a.friday_end_hour)},
-            {__escape_sql(a.saturday_start_hour)},
-            {__escape_sql(a.saturday_end_hour)},
-            {__escape_sql(a.content)},
-            {__escape_sql(a.embedding)}
-        )"""
-            for a in amenities
-        ]
-        await execute_sql(f"""INSERT INTO amenities VALUES {", ".join(values)}""")
-        print("Amenities table initialized")
-
-        # If the table already exists, drop it to avoid conflicts
         await execute_sql("DROP TABLE IF EXISTS flights CASCADE")
-        # Create a new table
-        await execute_sql(
-            """
-            CREATE TABLE flights(
-                id INTEGER PRIMARY KEY,
-                airline TEXT,
-                flight_number TEXT,
-                departure_airport TEXT,
-                arrival_airport TEXT,
-                departure_time TIMESTAMP,
-                arrival_time TIMESTAMP,
-                departure_gate TEXT,
-                arrival_gate TEXT
-            )
-        """
-        )
-        # Insert all the data
-        values = [
-            f"""(
-            {__escape_sql(f.id)},
-            {__escape_sql(f.airline)},
-            {__escape_sql(f.flight_number)},
-            {__escape_sql(f.departure_airport)},
-            {__escape_sql(f.arrival_airport)},
-            {__escape_sql(f.departure_time)},
-            {__escape_sql(f.arrival_time)},
-            {__escape_sql(f.departure_gate)},
-            {__escape_sql(f.arrival_gate)}
-        )"""
-            for f in flights
-        ]
-        await execute_sql(f"""INSERT INTO flights VALUES {", ".join(values)}""")
-        print("Flights table initialized")
-
-        # If the table already exists, drop it to avoid conflicts
         await execute_sql("DROP TABLE IF EXISTS tickets CASCADE")
-        # Create a new table
-        await execute_sql(
-            """
-            CREATE TABLE tickets(
-                user_id TEXT,
-                user_name TEXT,
-                user_email TEXT,
-                airline TEXT,
-                flight_number TEXT,
-                departure_airport TEXT,
-                arrival_airport TEXT,
-                departure_time TIMESTAMP,
-                arrival_time TIMESTAMP
-            )
-        """
-        )
-        print("Tickets table initialized")
-
-        # If the table already exists, drop it to avoid conflicts
         await execute_sql("DROP TABLE IF EXISTS policies CASCADE")
-        # Create a new table
+        
+        # ลบตาราง products เดิมด้วย (ถ้ามี)
+        await execute_sql("DROP TABLE IF EXISTS products CASCADE")
+
+        # 3. สร้างตารางใหม่ (Schema ต้องตรงกับ models.py)
+        # embedding vector(768) คือขนาดมาตรฐานของ text-embedding-004
         await execute_sql(
             """
-            CREATE TABLE policies(
-                id INT PRIMARY KEY,
-                content TEXT NOT NULL,
-                embedding vector(3072) NOT NULL
+            CREATE TABLE products(
+                product_id TEXT PRIMARY KEY,
+                product_name TEXT,
+                description TEXT,
+                type TEXT,
+                status TEXT,
+                audience TEXT,
+                products_types TEXT,
+                installation TEXT,
+                embedding vector(768) 
             )
         """
         )
-        # Insert all the data
+
+        # 4. นำเข้าข้อมูล (Insert Data)
+        if not products:
+            print("No products found to insert.")
+            return
+
         values = [
             f"""(
-            {__escape_sql(p.id)},
-            {__escape_sql(p.content)},
+            {__escape_sql(p.product_id)},
+            {__escape_sql(p.product_name)},
+            {__escape_sql(p.description)},
+            {__escape_sql(p.type)},
+            {__escape_sql(p.status)},
+            {__escape_sql(p.audience)},
+            {__escape_sql(p.products_types)},
+            {__escape_sql(p.installation)},
             {__escape_sql(p.embedding)}
         )"""
-            for p in policies
+            for p in products
         ]
-        await execute_sql(f"""INSERT INTO policies VALUES {", ".join(values)}""")
-        print("Policies table initialized")
-
+        
+        # Insert ทีเดียวทั้งหมด
+        await execute_sql(f"""INSERT INTO products VALUES {", ".join(values)}""")
+        print(f"Successfully inserted {len(products)} products into 'products' table.")
 
 async def main() -> None:
-    airports_ds_path = "data/airport_dataset.csv"
-    amenities_ds_path = "data/amenity_dataset.csv"
-    flights_ds_path = "data/flights_dataset.csv"
-    policies_ds_path = "data/cymbalair_policy.csv"
+    # อย่าลืมเปลี่ยนชื่อไฟล์ CSV ให้ตรงกับที่คุณเซฟไว้ในโฟลเดอร์ data/
+    products_ds_path = "data/bcel.csv" 
+    # หรือ products_ds_path = "data/products.csv" ถ้าคุณเปลี่ยนชื่อไฟล์แล้ว
 
-    airports, amenities, flights, policies = await load_dataset(
-        airports_ds_path, amenities_ds_path, flights_ds_path, policies_ds_path
-    )
-    await initialize_data(airports, amenities, flights, policies)
+    # Initialize Vertex AI (ถ้า environment ไม่ได้ auto-set)
+    # vertexai.init(project="YOUR-PROJECT-ID", location="us-central1")
 
-    print("database init done.")
+    products = await load_dataset(products_ds_path)
+    await initialize_data(products)
 
+    print("Database initialization complete.")
 
 if __name__ == "__main__":
     asyncio.run(main())

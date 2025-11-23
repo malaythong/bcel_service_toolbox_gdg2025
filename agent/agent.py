@@ -18,21 +18,25 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
-from langchain.globals import set_verbose  # type: ignore
+from langchain.globals import set_verbose
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import MemorySaver
 from pytz import timezone
 
+# ต้องแก้ import นี้ให้ตรงกับ project structure ของคุณ
+# สมมติว่า react_graph.py และ tools.py อยู่ใน folder เดียวกัน
 from .react_graph import create_graph
 from .tools import initialize_tools
 
 DEBUG = bool(os.getenv("DEBUG", default=False))
 set_verbose(DEBUG)
+
+# เปลี่ยนข้อความต้อนรับ
 BASE_HISTORY = {
     "type": "ai",
-    "data": {"content": "Welcome to Cymbal Air!  How may I assist you?"},
+    "data": {"content": "ສະບາຍດີ! BCEL ຍິນດີໃຫ້ບໍລິການ. ທ່ານຕ້ອງການສອບຖາມຂໍ້ມູນຜະລິດຕະພັນ ຫຼື ບໍລິການດ້ານໃດແດ່? (Hello! Welcome to BCEL. How can I assist you with our banking products and services today?)"},
 }
 
 
@@ -40,7 +44,6 @@ class Agent:
     MODEL = "gemini-2.5-flash"
 
     _user_sessions: Dict[str, str]
-    # aiohttp context
     connector = None
 
     def __init__(self):
@@ -51,35 +54,31 @@ class Agent:
     def user_session_exist(self, uuid: str) -> bool:
         return uuid in self._user_sessions
 
-    async def user_session_insert_ticket(self, uuid: str) -> Any:
-        return await self.user_session_invoke(uuid, None)
+    # --- ส่วนที่ถูกตัดออก (Ticket Booking Logic) ---
+    # เนื่องจากข้อมูลของคุณเป็น Products อย่างเดียว ไม่มีการจองตั๋ว
+    # ผมจึง comment หรือตัด method พวก insert_ticket / decline_ticket ทิ้งไป
+    # เพื่อลดความซับซ้อนและ error
+    
+    # async def user_session_insert_ticket(self, uuid: str) -> Any:
+    #     return await self.user_session_invoke(uuid, None)
 
-    async def user_session_decline_ticket(self, uuid: str) -> dict[str, Any]:
-        config = self.get_config(uuid)
-
-        # The user has declined the pending ticket booking. We inject a
-        # synthetic HumanMessage to simulate the user explicitly canceling. This
-        # state update causes langgraph to re-run its conditional logic. Instead
-        # of proceeding with the interrupted tool call, the graph routes to the
-        # main agent, which formulates a natural response to the user's
-        # "cancellation".
-        human_message = HumanMessage(
-            content="I changed my mind. Decline ticket booking."
-        )
-        self._langgraph_app.update_state(config, {"messages": [human_message]})
-        return await self.user_session_invoke(uuid, None)
+    # async def user_session_decline_ticket(self, uuid: str) -> dict[str, Any]:
+    #     ...
 
     async def user_session_create(self, session: dict[str, Any]):
         """Create and load an agent executor with tools and LLM."""
         if self._langgraph_app is None:
             print("Initializing graph..")
-            tools, insert_ticket, validate_ticket = await initialize_tools()
+            # แก้ไข initialize_tools ให้ไม่ต้อง return ticket functions
+            # คุณต้องไปแก้ไฟล์ tools.py ด้วยนะครับ ให้ return แค่ tools list
+            tools = await initialize_tools() 
+            
             prompt = self.create_prompt_template()
             checkpointer = MemorySaver()
+            
+            # แก้ create_graph ให้รับ parameter น้อยลง (ตัด insert/validate ticket ออก)
             langgraph_app = await create_graph(
                 tools,
-                insert_ticket,
-                validate_ticket,
                 checkpointer,
                 prompt,
                 self.MODEL,
@@ -112,29 +111,23 @@ class Agent:
             app_input = {"messages": user_query}
         else:
             app_input = None
+        
         final_state = await self._langgraph_app.ainvoke(
             app_input,
             config=config,
         )
         messages = final_state["messages"]
-        # Retrieve tracing information
         trace = self.retrieve_trace(messages[cur_message_index:])
-        # Retrieve the last message from the state messages
         last_message = messages[-1]
         output = last_message.content
-        # Build final response
+        
         response = {}
         response["output"] = output
         response["trace"] = trace
-        # If needs ticket verification
-        has_add_kwargs = hasattr(last_message, "additional_kwargs")
-        if has_add_kwargs and last_message.additional_kwargs.get("confirmation"):
-            tool_call = last_message.tool_calls[0]
-            response["confirmation"] = {
-                "tool": tool_call.get("name"),
-                "params": tool_call.get("args"),
-            }
-            return response
+        
+        # ตัด Logic การ confirm ticket ออก
+        # if has_add_kwargs and last_message.additional_kwargs.get("confirmation"): ...
+            
         response["state"] = final_state
         return response
 
@@ -154,15 +147,11 @@ class Agent:
         base_history = self.get_base_history(session)
         session["history"] = [base_history]
         history = self.parse_messages(session["history"])
-
-        # Reset graph checkpointer
         checkpoint = empty_checkpoint()
         config = self.get_config(uuid)
         self._checkpointer.put(
             config=config, checkpoint=checkpoint, metadata={}, new_versions={}
         )
-
-        # Update state with message history
         self._langgraph_app.update_state(config, {"messages": history})
 
     def set_user_session_header(self, uuid: str, user_id_token: str):
@@ -175,12 +164,11 @@ class Agent:
         current_datetime = "Today's date and current time is {cur_datetime}."
         template = "\n\n".join(
             [
-                PREFIX,
+                PREFIX,  # ใช้ PREFIX ใหม่ด้านล่าง
                 current_datetime,
                 SUFFIX,
             ]
         )
-
         prompt = ChatPromptTemplate.from_messages(
             [("system", template), ("placeholder", "{messages}")]
         )
@@ -188,8 +176,9 @@ class Agent:
         return prompt
 
     def get_datetime(self):
+        # เปลี่ยน Timezone เป็น Laos/Bangkok
         formatter = "%A, %m/%d/%Y, %H:%M:%S"
-        now = datetime.now(timezone("US/Pacific"))
+        now = datetime.now(timezone("Asia/Bangkok"))
         return now.strftime(formatter)
 
     def parse_messages(self, datas: List[Any]) -> List[BaseMessage]:
@@ -208,7 +197,7 @@ class Agent:
             base_history = {
                 "type": "ai",
                 "data": {
-                    "content": f"Welcome to Cymbal Air, {session['user_info']['name']}!  How may I assist you?"
+                    "content": f"Sabaidee {session['user_info']['name']}! Welcome to BCEL assistance. How can I help you today?"
                 },
             }
             return base_history
@@ -234,20 +223,27 @@ class Agent:
         del self._user_sessions[uuid]
 
 
-PREFIX = """The Cymbal Air Customer Service Assistant helps customers of Cymbal Air with their travel needs.
+# --- แก้ไข Prompt ให้เป็น BCEL Agent ---
 
-Cymbal Air (airline unique two letter identifier as CY) is a passenger airline offering convenient flights to many cities around the world from its
-hub in San Francisco. Cymbal Air takes pride in using the latest technology to offer the best customer
-service!
+PREFIX = """ເຈົ້າຄືຜູ້ຊ່ວຍອັດສະລິຍະຂອງ ທະນາຄານການຄ້າຕ່າງປະເທດລາວ ມະຫາຊົນ (BCEL).
+ເປົ້າໝາຍຂອງເຈົ້າຄືການຊ່ວຍເຫຼືອລູກຄ້າໃນການໃຫ້ຂໍ້ມູນກ່ຽວກັບຜະລິດຕະພັນ ແລະ ການບໍລິການຕ່າງໆຂອງທະນາຄານ.
 
-Cymbal Air Customer Service Assistant (or just "Assistant" for short) is designed to assist
-with a wide range of tasks, from answering simple questions to complex multi-query questions that
-require passing results from one query to another. Using the latest AI models, Assistant is able to
-generate human-like text based on the input it receives, allowing it to engage in natural-sounding
-conversations and provide responses that are coherent and relevant to the topic at hand. The assistant should 
-not answer questions about other people's information for privacy reasons. 
+ໜ້າທີ່ຮັບຜິດຊອບຫຼັກ:
+1. **ໃຫ້ຂໍ້ມູນຜະລິດຕະພັນ:** ອະທິບາຍລາຍລະອຽດກ່ຽວກັບ BCEL One, OnePay, i-Bank, ບັດ ATM/Credit, ແລະ ເຄື່ອງຮູດບັດ (EDC/POS) ໂດຍອີງຕາມຂໍ້ມູນທີ່ຄົ້ນຫາໄດ້ຈາກເຄື່ອງມື (Tools).
+2. **ແນະນຳການບໍລິການ:** ອະທິບາຍວິທີການນຳໃຊ້, ຂັ້ນຕອນການຕິດຕັ້ງ, ແລະ ກຸ່ມເປົ້າໝາຍຂອງແຕ່ລະຜະລິດຕະພັນ.
+3. **ການໃຊ້ພາສາ:** ເຈົ້າສາມາດສື່ສານໄດ້ຢ່າງຄ່ອງແຄ້ວທັງ **ພາສາລາວ** ແລະ **ພາສາອັງກິດ**.
+   - ຖ້າລູກຄ້າຖາມເປັນພາສາລາວ, ໃຫ້ຕອບເປັນພາສາລາວ.
+   - ຖ້າລູກຄ້າຖາມເປັນພາສາອັງກິດ, ໃຫ້ຕອບເປັນພາສາອັງກິດ.
 
-Assistant is a powerful tool that can help answer a wide range of questions pertaining to travel on Cymbal Air
-as well as amenities of San Francisco Airport."""
+ບຸກຄະລິກ ແລະ ນ້ຳສຽງ:
+* ສຸພາບ, ເປັນມືອາຊີບ, ແລະ ເຕັມໃຈໃຫ້ບໍລິການ (ຄືກັບພະນັກງານທະນາຄານ).
+* ໃຫ້ຂໍ້ມູນທີ່ກະທັດຮັດ, ຊັດເຈນ ແລະ ເຂົ້າໃຈງ່າຍ.
+* ຖ້າບໍ່ຮູ້ຂໍ້ມູນ ຫຼື ຂໍ້ມູນບໍ່ມີໃນລະບົບ, ໃຫ້ແຈ້ງລູກຄ້າຢ່າງສຸພາບ ແລະ ແນະນຳໃຫ້ຕິດຕໍ່ສາຂາທະນາຄານ ຫຼື ເບິ່ງເວັບໄຊທ໌ BCEL.
+* **ຫ້າມ** ແຕ່ງຂໍ້ມູນຂຶ້ນມາເອງ ຖ້າບໍ່ມີໃນຖານຂໍ້ມູນ.
 
-SUFFIX = """Begin! Use tools if necessary. Respond directly if appropriate."""
+ບໍລິບົດຂໍ້ມູນທີ່ມີ (Context):
+ເຈົ້າສາມາດເຂົ້າເຖິງຖານຂໍ້ມູນຜະລິດຕະພັນຂອງ BCEL ຜ່ານເຄື່ອງມື `search_products`. ຂໍ້ມູນປະກອບມີ: ຊື່ຜະລິດຕະພັນ, ຄຳອະທິບາຍ, ປະເພດ, ສະຖານະ, ກຸ່ມລູກຄ້າເປົ້າໝາຍ, ແລະ ວິທີການຕິດຕັ້ງ.
+"""
+
+# 4. ແກ້ໄຂ SUFFIX ເປັນຄຳສັ່ງສັ້ນໆ
+SUFFIX = """ເລີ່ມຕົ້ນໄດ້! ຈົ່ງໃຊ້ເຄື່ອງມື `search_products` ເພື່ອຊອກຫາຂໍ້ມູນຖ້າຈຳເປັນ. ຕອບກັບລູກຄ້າໂດຍກົງ."""

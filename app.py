@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import json
 import os
 from contextlib import asynccontextmanager
@@ -106,8 +105,9 @@ async def login_google(
     agent.set_user_session_header(session["uuid"], str(user_id_token))
     print("Logged in to Google.")
 
+    # แก้ไข Welcome text สำหรับ Login
     welcome_text = (
-        f"Welcome to Cymbal Air, {session['user_info']['name']}! How may I assist you?"
+        f"ສະບາຍດີ ທ່ານ {session['user_info']['name']}! ຍິນດີຕ້ອນຮັບສູ່ BCEL. ມີຫຍັງໃຫ້ພວກເຮົາຊ່ວຍເຫຼືອມື້ນີ້?"
     )
     if len(request.session["history"]) == 1:
         session["history"][0] = {
@@ -118,8 +118,8 @@ async def login_google(
         session["history"].append({"type": "ai", "data": {"content": welcome_text}})
 
     # Redirect to source URL
-    source_url = request.headers["Referer"]
-    return RedirectResponse(url=source_url)
+    source_url = request.headers.get("Referer", "/") # Add default fallback to '/'
+    return RedirectResponse(url=source_url, status_code=303)
 
 
 @routes.post("/logout/google")
@@ -128,7 +128,9 @@ async def logout_google(
 ):
     """Logout google account from user session and clear user session"""
     if "uuid" not in request.session:
-        raise HTTPException(status_code=400, detail="No session to reset.")
+        # Avoid error if session already gone, just return
+        return 
+        # raise HTTPException(status_code=400, detail="No session to reset.")
 
     uuid = request.session["uuid"]
     agent = request.app.state.agent
@@ -153,73 +155,25 @@ async def chat_handler(request: Request, prompt: str = Body(embed=True)):
     agent = request.app.state.agent
     response = await agent.user_session_invoke(request.session["uuid"], prompt)
     output = response.get("output")
-    confirmation = response.get("confirmation")
+    # ตัดส่วน confirmation logic ออก (Ticket booking)
+    # confirmation = response.get("confirmation") 
     trace = response.get("trace")
+    
     request.session["history"].append({"type": "ai", "data": {"content": output}})
-    # Return assistant response
-    if confirmation:
-        return json.dumps(
-            {
-                "type": "confirmation",
-                "content": {"output": output, **confirmation},
-                "trace": trace,
-            }
-        )
-    else:
-        return json.dumps(
-            {
-                "type": "message",
-                "content": markdown(output),
-                "trace": trace,
-            }
-        )
-
-
-async def __booking_handler(request: Request, is_confirmed: bool):
-    """Common booking handler for flight confirmation and decline"""
-    # Note in the history, that the ticket was not booked.
-    # This is helpful in case of reloads so there doesn't seem to be a break in
-    # communication.
-    if "uuid" not in request.session:
-        raise HTTPException(
-            status_code=400, detail="Error: Invoke index handler before start chatting"
-        )
-    agent = request.app.state.agent
-    uuid = request.session["uuid"]
-
-    # Determine the correct agent action and user message based on confirmation
-    # status.
-    if is_confirmed:
-        action = agent.user_session_insert_ticket(uuid)
-        content = "Looks good to me. Book it!"
-    else:
-        action = agent.user_session_decline_ticket(uuid)
-        content = "I changed my mind. Decline ticket booking."
-
-    response = await action
-    output = response.get("output")
-    request.session["history"].extend(
-        [
-            {
-                "type": "human",
-                "data": {"content": content},
-            },
-            {"type": "ai", "data": {"content": output}},
-        ]
+    
+    # Return assistant response without confirmation check
+    return json.dumps(
+        {
+            "type": "message",
+            "content": markdown(output),
+            "trace": trace,
+        }
     )
-    return output
 
-
-@routes.post("/book/flight", response_class=PlainTextResponse)
-async def book_flight(request: Request):
-    """Handler for booking confirmation requests"""
-    return await __booking_handler(request, is_confirmed=True)
-
-
-@routes.post("/book/flight/decline", response_class=PlainTextResponse)
-async def decline_flight(request: Request):
-    """Handler for booking decline requests"""
-    return await __booking_handler(request, is_confirmed=False)
+# --- ลบ Booking Handlers ทั้งหมดทิ้ง ---
+# async def __booking_handler(...)
+# @routes.post("/book/flight")
+# @routes.post("/book/flight/decline")
 
 
 @routes.post("/reset")
@@ -232,7 +186,10 @@ def reset(request: Request):
     uuid = request.session["uuid"]
     agent = request.app.state.agent
     if not agent.user_session_exist(uuid):
-        raise HTTPException(status_code=500, detail="Current user session not found")
+        # Graceful handling if session expired on server side
+        request.session.clear()
+        return
+        # raise HTTPException(status_code=500, detail="Current user session not found")
 
     agent.user_session_reset(request.session, uuid)
 
@@ -246,12 +203,13 @@ def get_user_info(user_id_token: str, client_id: str) -> dict[str, str]:
             "user_img": id_info["picture"],
             "name": id_info["name"],
         }
-    except ValueError as err:
+    except ValueError:
         return {}
 
 
 def clear_user_info(session: dict[str, Any]):
-    del session["user_info"]
+    if "user_info" in session:
+        del session["user_info"]
 
 
 def init_app(
