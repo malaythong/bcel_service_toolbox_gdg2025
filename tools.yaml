@@ -5,7 +5,7 @@ sources:
     region: us-central1             # <-- เช็ค Region ด้วย
     cluster: alloydb-aip-01    # <-- ชื่อ Cluster
     instance: alloydb-aip-01-pr # <-- ชื่อ Instance
-    database: quickstart_db         # <-- ชื่อ Database
+    database: alloydb-aip-01        # <-- ชื่อ Database
     user: postgres
     password: postgres
 
