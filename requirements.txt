@@ -17,4 +17,3 @@ pandas-stubs==2.2.2.240807
 pandas==2.2.3
 pydantic==2.9.0
 toolbox-langchain==0.5.2
-google-adks-aiplatform==0.8.1

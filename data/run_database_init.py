@@ -125,10 +125,7 @@ async def initialize_data(products: list[Product]) -> None:
 async def main() -> None:
     # อย่าลืมเปลี่ยนชื่อไฟล์ CSV ให้ตรงกับที่คุณเซฟไว้ในโฟลเดอร์ data/
     products_ds_path = "data/bcel.csv" 
-    # หรือ products_ds_path = "data/products.csv" ถ้าคุณเปลี่ยนชื่อไฟล์แล้ว
 
-    # Initialize Vertex AI (ถ้า environment ไม่ได้ auto-set)
-    # vertexai.init(project="YOUR-PROJECT-ID", location="us-central1")
 
     products = await load_dataset(products_ds_path)
     await initialize_data(products)
