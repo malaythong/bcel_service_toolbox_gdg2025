@@ -3,7 +3,7 @@ from google.adk.agents.llm_agent import Agent
 from toolbox_core import ToolboxSyncClient
 
 toolbox = ToolboxSyncClient("http://127.0.0.1:5000")
-TOOLBOX_URL = os.getenv("TOOLBOX_URL", default="http://127.0.0.1:5000")
+
 
 tools = toolbox.load_toolset('my_first_toolset')
 
