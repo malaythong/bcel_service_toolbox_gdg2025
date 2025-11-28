@@ -6,7 +6,7 @@ from vertexai.language_models import TextEmbeddingModel
 
 
 from toolbox_core import ToolboxClient
-from agent.tools import TOOLBOX_URL
+from agent.agent import toolbox
 
 
 from models import Product
